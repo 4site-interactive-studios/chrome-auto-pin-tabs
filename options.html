@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Auto Pin Tabs</title>
+  <style>
+    :root {
+      --ink: #1c2230;
+      --muted: #6b7280;
+      --paper: #ffffff;
+      --panel: #f6f6f4;
+      --line: #e6e6e2;
+      --line-strong: #cfcfca;
+      --accent: #2f6f6a;
+      --accent-ink: #234f4b;
+      --accent-wash: #eef5f4;
+      --danger: #a23b3b;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--panel);
+    }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 36px 20px 72px; }
+    header h1 { font-size: 22px; letter-spacing: -0.01em; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 26px; max-width: 56ch; }
+    section {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      margin: 0 0 18px;
+    }
+    h2 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--muted);
+      font-weight: 600;
+      margin: 0 0 14px;
+    }
+    /* Pin list */
+    .pins { list-style: none; margin: 0; padding: 0; }
+    .pin {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      padding: 12px 0;
+      border-top: 1px solid var(--line);
+    }
+    .pin:first-child { border-top: 0; padding-top: 2px; }
+    .moves { display: flex; flex-direction: column; gap: 3px; padding-top: 1px; }
+    .body { flex: 1; min-width: 0; }
+    .name { font-weight: 550; word-break: break-word; }
+    .url { color: var(--muted); font-size: 12.5px; word-break: break-all; margin: 1px 0 8px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+    .note { color: var(--muted); font-size: 12.5px; }
+    .empty { color: var(--muted); margin: 4px 0 0; }
+    /* Add + settings */
+    .add-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .add-grid .full { grid-column: 1 / -1; }
+    label.field { display: block; font-size: 12.5px; color: var(--muted); }
+    label.field span { display: block; margin-bottom: 5px; }
+    input[type="url"], input[type="text"], select {
+      width: 100%;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .preview { color: var(--muted); font-size: 12.5px; min-height: 1.3em; margin: 12px 0 0; }
+    .preview.error { color: var(--danger); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 0; }
+    .setting.checkbox { justify-content: flex-start; align-items: flex-start; gap: 10px; }
+    .setting.checkbox input { margin-top: 3px; }
+    .setting span.label { color: var(--ink); }
+    .setting select { width: auto; min-width: 240px; }
+    /* Buttons */
+    button {
+      font: inherit;
+      cursor: pointer;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      padding: 8px 13px;
+    }
+    button:hover { border-color: #b9b9b3; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+    button.icon { padding: 1px 9px; font-size: 13px; line-height: 1.4; color: var(--muted); }
+    button.icon:disabled { opacity: 0.35; cursor: default; }
+    button.danger { color: var(--danger); border-color: transparent; background: transparent; padding: 6px 8px; }
+    button.danger:hover { background: #fbeeee; border-color: transparent; }
+    .row-match { width: auto; min-width: 170px; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* Toast */
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%);
+      background: var(--ink);
+      color: #fff;
+      padding: 10px 15px;
+      border-radius: 9px;
+      font-size: 13px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+    }
+    @media (max-width: 560px) {
+      .add-grid { grid-template-columns: 1fr; }
+      .setting { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Auto Pin Tabs</h1>
+      <p class="sub">
+        Tabs in this list get pinned automatically when you open a new window. Matching
+        is per pin, so the same site at different paths stays separate and an open
+        thread or changing date won't create a duplicate.
+      </p>
+    </header>
+
+    <section aria-labelledby="pins-h">
+      <h2 id="pins-h">Pinned tabs</h2>
+      <ul id="pinList" class="pins"></ul>
+      <p id="empty" class="empty" hidden>No pins yet. Add one below, or import the tabs you already have pinned.</p>
+    </section>
+
+    <section aria-labelledby="add-h">
+      <h2 id="add-h">Add a pin</h2>
+      <div class="add-grid">
+        <label class="field full">
+          <span>URL</span>
+          <input id="url" type="url" placeholder="https://app.productive.io/2650-4site-interactive-studios-inc/tasks" />
+        </label>
+        <label class="field">
+          <span>Match</span>
+          <select id="match"></select>
+        </label>
+        <label class="field">
+          <span>Label (optional)</span>
+          <input id="label" type="text" placeholder="Shown in the list" />
+        </label>
+      </div>
+      <p id="preview" class="preview"></p>
+      <div class="actions">
+        <button id="add" type="button" class="primary">Add pin</button>
+        <button id="importPinned" type="button">Import open pinned tabs</button>
+        <button id="applyNow" type="button">Apply to this window</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="set-h">
+      <h2 id="set-h">Settings</h2>
+      <label class="setting">
+        <span class="label">When to pin</span>
+        <select id="applyMode">
+          <option value="startup_and_new">On startup and every new window</option>
+          <option value="startup_only">On startup only</option>
+        </select>
+      </label>
+      <label class="setting checkbox">
+        <input id="cleanupTwins" type="checkbox" />
+        <span class="label">After a restore, remove Chrome's duplicate copies of pinned tabs</span>
+      </label>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="options.js"></script>
+</body>
+</html>
