@@ -1,0 +1,1 @@
+# chrome-auto-pin-tabs
