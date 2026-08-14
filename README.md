@@ -117,21 +117,28 @@ src/service-worker.js   quiescence scheduler and event listeners
 test/matcher.test.mjs   matching across the profiles and match types
 test/cleanup.test.mjs   twin removal and duplicate collapse
 test/order.test.mjs     final pinned-tab ordering
-package.json            type:module, so Node loads the source for tests
+test/drift.test.mjs     drift-tolerant pin-to-tab assignment
+build.mjs               regenerates background.js from src/
+package.json            npm test and npm run build
 ```
 
 Run the tests with Node 18 or newer:
 
 ```
-node test/matcher.test.mjs
-node test/cleanup.test.mjs
-node test/order.test.mjs
+npm test
 ```
 
-`background.js` is the four source modules concatenated with their `import` and `export` lines stripped, which keeps the shipped file a single classic service worker (no module loading to break) while the matcher inside it stays identical to the tested source.
+After changing anything under `src/`, regenerate the shipped worker:
+
+```
+npm run build
+```
+
+`build.mjs` concatenates the four source modules with their `import` and `export` lines stripped, which keeps the shipped file a single classic service worker (no module loading to break) while the matcher inside it stays identical to the tested source. Never commit `key.pem` (the private key pairing with the manifest `key` field); `.gitignore` covers it.
 
 ## Known behavior and limits
 
+- Drift tolerance means a pin is satisfied by any still-unclaimed pinned tab on the same origin once stricter matches fail. Two pins on the same origin that have BOTH drifted get claimed in list order, which can occasionally pair a pin with the other pin's drifted tab; no duplicates are created either way, and the next exact match re-anchors them.
 - A plain pin under a path-matching profile treats a query-variant tab as the same pin. So a Smart `/tasks` pin will consider a `/tasks?filter=...` tab a match. If you want the board and a filtered view as separate pins, set both to Exact.
 - Reorder enforces the list order whenever it runs, including on reload and "Apply to this window." If you manually drag your pinned tabs into a different order and then reload, they snap back to the list order. Set order with the up and down arrows instead.
 - The settle wait handles normal restores. A very large session that takes many seconds to restore is covered as long as Chrome keeps firing tab events while it loads.
@@ -139,6 +146,8 @@ node test/order.test.mjs
 
 ## Version history
 
+- **0.6.0** Drift-tolerant matching: a pinned tab you've navigated around in still counts as its pin (same-origin claiming), so restores no longer duplicate drifted tabs. Removed the hardcoded seed pins; an empty list now stays empty until sync delivers it or you add pins.
+- **0.5.0** Stability-polling scheduler: reconcile waits until a window's tab set stops changing, with a delayed cleanup-only recheck.
 - **0.4.0** Reorder pass that puts pinned tabs back into the list order after creation and cleanup.
 - **0.3.0** Quiescence-based scheduling to stop the cold-start restore race, plus collapse of identical-URL pinned duplicates.
 - **0.2.0** Management interface, per-pin match types, and the stable-ID key.

@@ -122,13 +122,18 @@ function keyFor(rawUrl, match) {
   }
 }
 
+
+
 // ===== from src/storage.js =====
 // storage.js
 // Thin wrapper over chrome.storage.sync for the pin list and settings. Using sync so
 // the config follows the user across machines; the data is tiny and well under quota.
 //
-// Phase 1 has no options UI yet, so we seed a few pins on first run to make the
-// behavior testable. Phase 2 replaces the seed with the add/remove/sort interface.
+// Note: getPins never writes. Earlier versions seeded a hardcoded pin list into empty
+// storage, but on a machine where Chrome Sync hasn't delivered the real list yet that
+// write races the sync and can clobber it. An empty list simply means "nothing to pin
+// yet": reconcile no-ops, and the list arrives via sync or gets built in the options
+// page ("Import open pinned tabs" recreates a setup in one click).
 
 const DEFAULTS = {
   // "startup_and_new" -> pin at cold start AND on every new normal window (default)
@@ -139,46 +144,9 @@ const DEFAULTS = {
   cleanupTwins: true,
 };
 
-const SEED_PINS = [
-  {
-    id: "seed-productive-tasks",
-    url: "https://app.productive.io/2650-4site-interactive-studios-inc/tasks",
-    match: "smart",
-    label: "Productive \u00b7 Tasks",
-  },
-  {
-    id: "seed-productive-tasks-filtered",
-    url: "https://app.productive.io/2650-4site-interactive-studios-inc/tasks?filter=eyIwIjp7IjAiOnsiYXNzaWduZWVfaWQiOnsiZXEiOlsiMzI1MTAiXX19LCIxIjp7IndvcmtmbG93X3N0YXR1c19jYXRlZ29yeV9pZCI6eyJlcSI6WyIxIiwiMiJdfX0sIiRvcCI6ImFuZCJ9LCJpZCI6IjMxOTIiLCJzb3J0QnkiOiJkdWUtZGF0ZSIsImdyb3VwQnkiOm51bGwsImNvbHVtbnMiOiJ0aXRsZSxwcm9qZWN0LHRhc2stbGlzdCxkdWUtZGF0ZSx0b2RvcyxyZW1haW5pbmctdGltZSx3b3JrZmxvdy1zdGF0dXMiLCJjb2x1bW5TZXR0aW5ncyI6e30sInNldHRpbmdzIjp7fSwiZm9ybXVsYXMiOnt9LCJ0cmFuc3Bvc2VCeSI6bnVsbCwibGF5b3V0SWQiOiIxMDIiLCJyZXBvcnRMYXlvdXRJZCI6bnVsbCwiY2hhcnRUeXBlSWQiOm51bGwsIiRvcCI6ImFuZCJ9",
-    match: "exact",
-    label: "Productive \u00b7 Tasks (filtered view)",
-  },
-  {
-    id: "seed-productive-time",
-    url: "https://app.productive.io/2650-4site-interactive-studios-inc/time/me",
-    match: "smart",
-    label: "Productive \u00b7 My time",
-  },
-  {
-    id: "seed-gcal",
-    url: "https://calendar.google.com/calendar/u/0/r/week",
-    match: "smart",
-    label: "Calendar",
-  },
-  {
-    id: "seed-gmail",
-    url: "https://mail.google.com/mail/u/0/#inbox",
-    match: "smart",
-    label: "Gmail \u00b7 Inbox",
-  },
-];
-
 async function getPins() {
   const { pins } = await chrome.storage.sync.get("pins");
-  if (!Array.isArray(pins)) {
-    await chrome.storage.sync.set({ pins: SEED_PINS });
-    return SEED_PINS.slice();
-  }
-  return pins;
+  return Array.isArray(pins) ? pins : [];
 }
 
 async function setPins(pins) {
@@ -195,7 +163,9 @@ async function setSettings(patch) {
   await chrome.storage.sync.set({ settings: { ...current, ...patch } });
 }
 
+
 // ===== from src/reconcile.js =====
+
 // reconcile.js
 // The heart of the extension. reconcileWindow brings a single window in line with the
 // configured pin list: it adds any pin that isn't already present, then (optionally)
@@ -265,32 +235,77 @@ function moveTabs(tabIds, index) {
   });
 }
 
-// Work out the order pinned tabs SHOULD be in: configured pins first, in list order,
-// then any other pinned tabs (manual ones) after, keeping their relative order. Each tab
-// is claimed once. A pin claims the tab whose full URL equals the pin's URL when one
-// exists (so a plain /tasks and a filtered /tasks?... that share a smart key still line
-// up with their own pins), otherwise the first tab matching under the pin's own mode.
-function desiredPinnedOrder(pins, pinnedTabs) {
-  const remaining = pinnedTabs.slice();
-  const ordered = [];
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+// Assign each pin the one open tab that represents it, across all pins at once. Three
+// passes, strictest first, each tab claimable once:
+//   1) exact full URL
+//   2) the pin's own match mode
+//   3) drift tolerance: a PINNED tab on the pin's origin that nothing claimed. A pinned
+//      tab is a live app; its URL wanders as you use it (open a task, click a thread).
+//      Without this pass a drifted pinned tab stops matching its pin after a restore and
+//      a duplicate gets created right next to it.
+// Pass order is what keeps pass 3 safe: any tab that properly matches some pin is
+// claimed in passes 1-2 before origin matching ever runs.
+function assignPinsToTabs(pins, tabs) {
+  const byPin = new Map(); // pin -> tab
+  const claimed = new Set(); // tab ids
   for (const pin of pins) {
-    const mode = pin.match || "smart";
-    const pinExact = keyFor(pin.url, "exact");
-    let i = remaining.findIndex((t) => keyFor(tabUrl(t), "exact") === pinExact);
-    if (i === -1) {
-      const pk = keyFor(pin.url, mode);
-      i = remaining.findIndex((t) => keyFor(tabUrl(t), mode) === pk);
-    }
-    if (i !== -1) {
-      ordered.push(remaining[i]);
-      remaining.splice(i, 1);
+    const pe = keyFor(pin.url, "exact");
+    const t = tabs.find((t) => !claimed.has(t.id) && keyFor(tabUrl(t), "exact") === pe);
+    if (t) {
+      byPin.set(pin, t);
+      claimed.add(t.id);
     }
   }
-  for (const t of remaining) ordered.push(t); // unclaimed (manual) pins keep their order
+  for (const pin of pins) {
+    if (byPin.has(pin)) continue;
+    const mode = pin.match || "smart";
+    const pk = keyFor(pin.url, mode);
+    const t = tabs.find((t) => !claimed.has(t.id) && keyFor(tabUrl(t), mode) === pk);
+    if (t) {
+      byPin.set(pin, t);
+      claimed.add(t.id);
+    }
+  }
+  for (const pin of pins) {
+    if (byPin.has(pin)) continue;
+    const po = originOf(pin.url);
+    if (!po) continue;
+    const t = tabs.find((t) => !claimed.has(t.id) && t.pinned && originOf(tabUrl(t)) === po);
+    if (t) {
+      byPin.set(pin, t);
+      claimed.add(t.id);
+    }
+  }
+  return byPin;
+}
+
+// Work out the order pinned tabs SHOULD be in: configured pins first, in list order,
+// then any other pinned tabs (manual ones) after, keeping their relative order. Uses the
+// same assignment as creation, so a drifted tab orders under the pin that claimed it.
+function desiredPinnedOrder(pins, pinnedTabs) {
+  const byPin = assignPinsToTabs(pins, pinnedTabs);
+  const ordered = [];
+  const used = new Set();
+  for (const pin of pins) {
+    const t = byPin.get(pin);
+    if (t && !used.has(t.id)) {
+      ordered.push(t);
+      used.add(t.id);
+    }
+  }
+  for (const t of pinnedTabs) if (!used.has(t.id)) ordered.push(t);
   return ordered;
 }
 
-async function reconcileWindow(windowId) {
+async function reconcileWindow(windowId, opts = {}) {
   if (inFlight.has(windowId)) return;
   inFlight.add(windowId);
   try {
@@ -312,25 +327,28 @@ async function reconcileWindow(windowId) {
     // window or as a side effect of our own pinning.
     const arrivedWithPinned = tabsAtStart.some((t) => t.pinned);
 
-    // 1) Add any missing pins, in configured order, packed to the left.
-    //    A pin counts as already present when some tab in the window matches it UNDER
-    //    THAT PIN'S match mode. This is why an Exact pin (e.g. a Productive tasks view
-    //    with a ?filter= argument) is distinct from the plain path and still dedupes:
-    //    the same mode is applied to both sides of the comparison.
-    const createdThisPass = new Set(); // "mode::key" of pins created, dedupes identical rows
-    let index = 0;
-    for (const pin of pins) {
-      const mode = pin.match || "smart";
-      const pk = keyFor(pin.url, mode);
-      const composite = mode + "::" + pk;
-      const inWindow = tabsAtStart.some((t) => keyFor(tabUrl(t), mode) === pk);
-      if (inWindow || createdThisPass.has(composite)) {
-        index++; // already here (restored, duplicate row, or just created): hold its slot
-        continue;
+    // 1) Add any missing pins, in configured order, packed to the left. A pin is
+    //    "present" when the assignment gives it a tab: exact match first, then its own
+    //    match mode, then the drift-tolerant origin pass (see assignPinsToTabs). This is
+    //    what stops a pinned tab you've navigated around in from being duplicated.
+    // opts.skipCreate is used by the late-restore recheck: it re-runs cleanup and
+    // reorder to catch a duplicate that materialized after the first pass, without
+    // recreating a pin the user may have deliberately closed in the meantime.
+    if (!opts.skipCreate) {
+      const byPin = assignPinsToTabs(pins, tabsAtStart);
+      const createdThisPass = new Set(); // "mode::key" created, dedupes identical rows
+      let index = 0;
+      for (const pin of pins) {
+        const mode = pin.match || "smart";
+        const composite = mode + "::" + keyFor(pin.url, mode);
+        if (byPin.has(pin) || createdThisPass.has(composite)) {
+          index++; // already here (restored, drifted, or duplicate row): hold its slot
+          continue;
+        }
+        await createPinned(pin.url, index);
+        createdThisPass.add(composite);
+        index++;
       }
-      await createPinned(pin.url, index);
-      createdThisPass.add(composite);
-      index++;
     }
 
     // 2) Re-query so we see the restored tabs plus anything we just created. Then clean
@@ -346,7 +364,7 @@ async function reconcileWindow(windowId) {
     const tabs2 = (after && after.tabs) || tabsAtStart;
     const removed = new Set();
 
-    if (settings.cleanupTwins && arrivedWithPinned) {
+    if (settings.cleanupTwins && (arrivedWithPinned || opts.skipCreate)) {
       const pinnedNow = tabs2.filter((t) => t.pinned);
       const pinnedUrls = new Set(pinnedNow.map((t) => keyFor(tabUrl(t), "exact")));
 
@@ -402,85 +420,94 @@ async function reconcileAllWindows() {
 
 // ===== from src/service-worker.js =====
 // service-worker.js
-// Event entry points. Every listener is registered synchronously at the top level so
-// the worker reliably wakes for these events.
+// Event entry points and scheduling. Every listener is registered synchronously at the
+// top level so the worker reliably wakes for these events.
 //
-// Scheduling is quiescence-based. The hard problem is session restore: Chrome brings a
-// window's tabs back asynchronously, so reconciling the instant a window appears can run
-// before the restored (pinned) tabs show up, which makes us recreate them and produce
-// duplicates. Instead of a fixed delay, we wait until a window has stopped receiving new
-// tabs for QUIET_MS, then reconcile once. A restore keeps firing tab events, which keep
-// pushing the timer out, so we naturally act only after it settles.
+// Scheduling watches the actual tab set rather than tab events. The earlier event-based
+// approach could miss a session restore's early tab events (the worker isn't awake yet
+// when they fire on cold start), end its wait too soon, and reconcile against a
+// half-restored window, which recreated the tabs that were about to come back. Instead
+// we poll the window's tabs until they stop changing (two identical snapshots in a row),
+// then reconcile. Polling has a second benefit: the repeated API calls keep the worker
+// alive through a long restore.
 
 
-const QUIET_MS = 800;
-const tracked = new Map(); // windowId -> { timer, settled }
+const POLL_MS = 700; // gap between stability checks
+const MAX_SETTLE_MS = 20000; // stop waiting after this and reconcile anyway
+const RECHECK_MS = 3500; // after reconciling, one late pass to catch a duplicate that arrives after
+const settling = new Set(); // windowIds currently being settled, so we don't stack loops
 
-function arm(windowId) {
-  const state = tracked.get(windowId) || { timer: null, settled: false };
-  if (state.timer) clearTimeout(state.timer);
-  state.timer = setTimeout(() => {
-    state.settled = true; // ignore tab events caused by our own pinning during reconcile
-    reconcileWindow(windowId)
-      .catch((e) => console.warn("[auto-pin] reconcile error:", e))
-      .finally(() => tracked.delete(windowId));
-  }, QUIET_MS);
-  tracked.set(windowId, state);
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function track(windowId) {
-  if (!tracked.has(windowId)) tracked.set(windowId, { timer: null, settled: false });
-  arm(windowId);
+// A stable fingerprint of a window's tabs: id + resolved URL, sorted. Returns null if the
+// window is gone or isn't a normal window.
+async function snapshot(windowId) {
+  try {
+    const win = await chrome.windows.get(windowId, { populate: true });
+    if (win.type !== "normal" || win.incognito) return null;
+    return (win.tabs || [])
+      .map((t) => `${t.id}|${t.url || t.pendingUrl || ""}`)
+      .sort()
+      .join("\n");
+  } catch {
+    return null;
+  }
 }
 
-// New window. Begin settle tracking unless we're in startup-only mode.
+async function settleAndReconcile(windowId) {
+  if (settling.has(windowId)) return;
+  settling.add(windowId);
+  try {
+    let prev = await snapshot(windowId);
+    if (prev === null) return;
+    const start = Date.now();
+    // Wait until two consecutive snapshots match (tabs and their URLs have settled).
+    while (Date.now() - start < MAX_SETTLE_MS) {
+      await delay(POLL_MS);
+      const cur = await snapshot(windowId);
+      if (cur === null) return; // window closed mid-settle
+      if (cur === prev) break; // settled
+      prev = cur;
+    }
+    await reconcileWindow(windowId);
+    // Late-restore safety net: a single delayed pass that only cleans up and reorders,
+    // catching any duplicate that appeared after we reconciled without recreating pins.
+    await delay(RECHECK_MS);
+    await reconcileWindow(windowId, { skipCreate: true });
+  } catch (e) {
+    console.warn("[auto-pin] settle error:", e);
+  } finally {
+    settling.delete(windowId);
+  }
+}
+
+// New window. Settle then reconcile, unless we're in startup-only mode.
 chrome.windows.onCreated.addListener((win) => {
   if (!win || typeof win.id !== "number") return;
   getSettings()
     .then(({ applyMode }) => {
       if (applyMode === "startup_only") return;
-      track(win.id);
+      settleAndReconcile(win.id);
     })
     .catch((e) => console.warn("[auto-pin] onCreated settings error:", e));
 });
 
-// While a tracked window is still settling, each new tab pushes the timer out. This is
-// what waits for a session restore (or a reopened window) to finish.
-chrome.tabs.onCreated.addListener((tab) => {
-  const state = tracked.get(tab.windowId);
-  if (state && !state.settled) arm(tab.windowId);
-});
-
-// Belt and suspenders: restored tabs loading also reset the timer, in case any arrive
-// without an onCreated we saw.
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
-  if (!changeInfo.status && !changeInfo.url) return;
-  const state = tracked.get(tab.windowId);
-  if (state && !state.settled) arm(tab.windowId);
-});
-
-// Cold start. Track every existing normal window and let quiescence handle the restore.
+// Cold start. Settle every existing normal window; polling waits out the restore.
 chrome.runtime.onStartup.addListener(() => {
   chrome.windows
     .getAll({ windowTypes: ["normal"] })
-    .then((wins) => wins.forEach((w) => track(w.id)))
+    .then((wins) => wins.forEach((w) => settleAndReconcile(w.id)))
     .catch((e) => console.warn("[auto-pin] startup error:", e));
 });
 
-// Extension load or update. Windows are already populated here, so reconcile through the
-// same settle path for consistency. Also how seeds first appear after install.
+// Extension load or update. Windows are already populated, but settle for consistency.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.windows
     .getAll({ windowTypes: ["normal"] })
-    .then((wins) => wins.forEach((w) => track(w.id)))
+    .then((wins) => wins.forEach((w) => settleAndReconcile(w.id)))
     .catch((e) => console.warn("[auto-pin] install error:", e));
-});
-
-// Clean up tracking if a window closes mid-settle.
-chrome.windows.onRemoved.addListener((windowId) => {
-  const state = tracked.get(windowId);
-  if (state && state.timer) clearTimeout(state.timer);
-  tracked.delete(windowId);
 });
 
 // Toolbar button opens the management page.
@@ -488,8 +515,8 @@ chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
 
-// Messages from the options page. "applyNow" reconciles the most recently focused
-// normal window so edits show up without opening a new window.
+// Messages from the options page. "applyNow" reconciles the most recently focused normal
+// window so edits show up without opening a new window.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "applyNow") {
     chrome.windows
