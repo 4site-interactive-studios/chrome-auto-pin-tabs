@@ -134,6 +134,8 @@ After changing anything under `src/`, regenerate the shipped worker:
 npm run build
 ```
 
+For Chrome Web Store packaging, `node build-store.mjs` produces `dist/store-upload.zip` (runtime files only, manifest `key` field stripped), and `node build-store.mjs --first-upload` additionally bundles `key.pem` so the initial upload keeps the extension ID. `STORE.md` has the full submission walkthrough and paste-ready dashboard answers; `PRIVACY.md` is the privacy policy the listing links to.
+
 `build.mjs` concatenates the four source modules with their `import` and `export` lines stripped, which keeps the shipped file a single classic service worker (no module loading to break) while the matcher inside it stays identical to the tested source. Never commit `key.pem` (the private key pairing with the manifest `key` field); `.gitignore` covers it.
 
 ## Known behavior and limits
@@ -146,6 +148,7 @@ npm run build
 
 ## Version history
 
+- **0.7.0** Store readiness: icon set (16/32/48/128) wired into the manifest and toolbar, privacy policy, store packaging script, and submission notes.
 - **0.6.0** Drift-tolerant matching: a pinned tab you've navigated around in still counts as its pin (same-origin claiming), so restores no longer duplicate drifted tabs. Removed the hardcoded seed pins; an empty list now stays empty until sync delivers it or you add pins.
 - **0.5.0** Stability-polling scheduler: reconcile waits until a window's tab set stops changing, with a delayed cleanup-only recheck.
 - **0.4.0** Reorder pass that puts pinned tabs back into the list order after creation and cleanup.
