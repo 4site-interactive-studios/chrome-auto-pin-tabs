@@ -30,7 +30,7 @@ const stage = "dist/stage";
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
-for (const f of ["background.js", "options.html", "options.js"]) {
+for (const f of ["background.js", "options.html", "options.js", "popup.html", "popup.js"]) {
   fs.copyFileSync(f, path.join(stage, f));
 }
 fs.mkdirSync(path.join(stage, "icons"));
@@ -61,5 +61,5 @@ const zipName = firstUpload ? "store-upload-first.zip" : "store-upload.zip";
 execSync(`cd ${stage} && zip -qr ../${zipName} .`, { stdio: "inherit" });
 fs.rmSync(stage, { recursive: true, force: true });
 
-const files = firstUpload ? "manifest, worker, options, icons, key.pem" : "manifest, worker, options, icons";
+const files = firstUpload ? "manifest, worker, options, popup, icons, key.pem" : "manifest, worker, options, popup, icons";
 console.log(`dist/${zipName} written (${files}; manifest "key" stripped, v${manifest.version})`);

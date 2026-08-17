@@ -16,7 +16,7 @@ A Chrome extension (Manifest V3) that pins a chosen set of tabs automatically in
 
 This is loaded as an unpacked extension.
 
-1. Put the extension files in a folder. The folder needs `manifest.json`, `background.js`, `options.html`, and `options.js` at its top level.
+1. Put the extension files in a folder. The folder needs `manifest.json`, `background.js`, `options.html`, `options.js`, `popup.html`, and `popup.js` at its top level.
 2. Open `chrome://extensions`.
 3. Turn on **Developer mode** (top right).
 4. Click **Load unpacked** and select the folder. The card should show the name "Auto Pin Tabs" and the current version.
@@ -27,11 +27,11 @@ The `manifest.json` includes a `key` field. That fixes the extension ID (`cdplkg
 
 ## The interface
 
-Open it by clicking the toolbar button (find Auto Pin Tabs under the Extensions puzzle-piece icon, and pin it for one click), or from `chrome://extensions` under **Details, Extension options**.
+**The toolbar popup.** Clicking the toolbar button (find Auto Pin Tabs under the Extensions puzzle-piece icon, and pin it for one click) opens a small popup. It shows the page you're on with a one-click **Pin this tab** button — pinned immediately, added to the list with Smart matching, and slotted into your configured order. The button is disabled with a short note on pages that can't be pinned (anything that isn't http/https) and reads **Already a pin** when an existing pin covers the page. Below that: a compact pin list where each row can be renamed (✎ — the name is display-only and never affects matching; leave it empty to go back to the automatic name), dragged by its ⠿ handle to reorder (on release, the pinned tabs in the current window move to match), or removed (× — removing a pin never closes or unpins the tab). The footer has **Apply to this window** and **Manage pins…**, which opens the full management page.
 
-The page has three parts.
+**The management page.** Open it from the popup's **Manage pins…** button, or from `chrome://extensions` under **Details, Extension options**. The page has three parts.
 
-**Pinned tabs.** Your pins as a list. Each row shows the label and URL, a match-type dropdown with a plain-language note that updates as you change it, up and down arrows to reorder, and a remove button. Order here is the order pins appear in new windows.
+**Pinned tabs.** Your pins as a list. Each row shows the label and URL, a rename button (✎ — display-only, clear it to return to the automatic name), a match-type dropdown with a plain-language note that updates as you change it, up and down arrows to reorder, and a remove button. Order here is the order pins appear in new windows.
 
 **Add a pin.** Paste a URL, pick a match type, and optionally give it a label. A live note tells you how it will match before you save. "Import open pinned tabs" seeds the list from whatever you already have pinned. "Apply to this window" pushes your current pins into the window you're in, so you can see changes without opening a new one.
 
@@ -98,13 +98,15 @@ No host permissions are needed, since creating a tab at a URL doesn't require th
 
 ## Project layout and development
 
-The loadable extension is four files:
+The loadable extension is six files:
 
 ```
-manifest.json     MV3 manifest, the stable-ID key, the toolbar action, and the options page
-background.js      the service worker: matcher, storage, reconcile, and event wiring
+manifest.json     MV3 manifest, the stable-ID key, the toolbar popup, and the options page
+background.js      the service worker: matcher, storage, reconcile, events, and popup messages
 options.html       the management page markup and styles
 options.js         the management page logic
+popup.html         the toolbar popup markup and styles
+popup.js           the toolbar popup logic (a thin view over service-worker messages)
 ```
 
 `background.js` is generated from a set of small source modules so the logic can be unit-tested in plain Node without Chrome:
@@ -119,6 +121,8 @@ test/cleanup.test.mjs   claim-based duplicate detection (findDuplicateTabIds)
 test/order.test.mjs     final pinned-tab ordering
 test/drift.test.mjs     drift-tolerant pin-to-tab assignment
 test/reconcile.test.mjs reconcileWindow against a mocked chrome (window targeting, idempotence)
+test/popup-logic.test.mjs  findPinForUrl / preparePinForTab / removePinByIdentity
+test/messages.test.mjs  service-worker message handlers against a mocked chrome
 build.mjs               regenerates background.js from src/
 package.json            npm test and npm run build
 ```
@@ -149,6 +153,8 @@ For Chrome Web Store packaging, `node build-store.mjs` produces `dist/store-uplo
 
 ## Version history
 
+- **0.9.0** Rename and reorder from the popup: every pin can be renamed inline (✎, also added to the management page; names are display-only and never affect matching) and dragged into a new order — on release the saved order updates and the current window's pinned tabs move to match immediately.
+- **0.8.0** Toolbar popup: one-click "Pin this tab" (pins immediately, adds with Smart matching, slots into your order), quick remove per pin, and Apply — with all decisions made by the tested service-worker logic. The options page now refreshes when pins change elsewhere (popup or another synced machine) instead of overwriting those changes on its next save.
 - **0.7.1** Duplicate-pin fixes: created tabs now target the window being reconciled (previously they landed in the focused window, so a multi-window restore piled every window's pin set into one window), and cleanup now collapses duplicates by each pin's own match rule instead of exact URL only, so a duplicate that navigated is still removed. Cleanup never removes a same-site pinned tab the matcher treats as distinct (a second Slack channel, another Google account), never touches blank still-loading tabs, and no longer acts on a stale snapshot if the window closes mid-pass.
 - **0.7.0** Store readiness: icon set (16/32/48/128) wired into the manifest and toolbar, privacy policy, store packaging script, and submission notes.
 - **0.6.0** Drift-tolerant matching: a pinned tab you've navigated around in still counts as its pin (same-origin claiming), so restores no longer duplicate drifted tabs. Removed the hardcoded seed pins; an empty list now stays empty until sync delivers it or you add pins.

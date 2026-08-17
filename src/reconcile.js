@@ -117,6 +117,73 @@ export function dedupePins(pins) {
   return out;
 }
 
+// Which existing pin (if any) already covers this URL, judged by each pin's OWN
+// match rule — the same test creation uses, so the popup's "Already a pin" state
+// can never disagree with what reconcile would do.
+export function findPinForUrl(pins, url) {
+  if (isOpaque(url)) return null;
+  for (const pin of pins) {
+    const mode = pin.match || "smart";
+    if (keyFor(url, mode) === keyFor(pin.url, mode)) return pin;
+  }
+  return null;
+}
+
+// Decide whether a tab can become a new pin. Pure; id assignment stays with the caller.
+export function preparePinForTab(pins, url, title) {
+  if (!/^https?:\/\//i.test(url || "")) return { ok: false, reason: "not-http" };
+  const existing = findPinForUrl(pins, url);
+  if (existing) return { ok: false, reason: "already-pin", existing };
+  return { ok: true, pin: { url, match: "smart", label: (title || "").slice(0, 40) } };
+}
+
+export function removePinByIdentity(pins, url, match) {
+  const m = match || "smart";
+  return pins.filter((p) => !(p.url === url && (p.match || "smart") === m));
+}
+
+// Row matcher for popup-initiated edits: prefer the stable id when both sides have
+// one, else fall back to url + normalized match.
+function sameRow(pin, ref) {
+  if (ref.id && pin.id) return pin.id === ref.id;
+  return pin.url === ref.url && (pin.match || "smart") === (ref.match || "smart");
+}
+
+// Set (or clear, with an empty string) a pin's display label. Labels are cosmetic:
+// matching keys on the URL alone, so a rename can never change what a pin claims.
+export function renamePinByIdentity(pins, ref, label) {
+  const next = pins.map((p) => ({ ...p }));
+  const target = next.find((p) => sameRow(p, ref));
+  if (target) target.label = (label || "").trim();
+  return next;
+}
+
+// Rearrange pins to match `order` (an array of {id?, url, match} refs). Rows the
+// order doesn't mention — a sync race adding a pin mid-drag — keep their relative
+// order and go to the end, so nothing is ever silently dropped.
+export function reorderPinsByIdentity(pins, order) {
+  const remaining = pins.slice();
+  const out = [];
+  for (const ref of order || []) {
+    const i = remaining.findIndex((p) => sameRow(p, ref));
+    if (i >= 0) out.push(remaining.splice(i, 1)[0]);
+  }
+  return out.concat(remaining);
+}
+
+// Display name for a pin: label, else last path segment, else host. Mirrors the
+// options page's deriveName so the popup and the options page agree on names.
+export function pinDisplayName(pin) {
+  if (pin.label) return pin.label;
+  try {
+    const u = new URL(pin.url);
+    const last = u.pathname.split("/").filter(Boolean).pop();
+    return last || u.host;
+  } catch {
+    return pin.url;
+  }
+}
+
 // Assign each pin the one open tab that represents it, across all pins at once. Three
 // passes, strictest first, each tab claimable once:
 //   1) exact full URL

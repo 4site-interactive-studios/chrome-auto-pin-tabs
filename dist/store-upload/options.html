@@ -56,6 +56,15 @@
     .moves { display: flex; flex-direction: column; gap: 3px; padding-top: 1px; }
     .body { flex: 1; min-width: 0; }
     .name { font-weight: 550; word-break: break-word; }
+    .name-row { display: flex; align-items: center; gap: 6px; }
+    .name-row input.rename {
+      flex: 0 1 280px;
+      font: inherit;
+      color: var(--ink);
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      padding: 3px 8px;
+    }
     .url { color: var(--muted); font-size: 12.5px; word-break: break-all; margin: 1px 0 8px; }
     .meta { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
     .note { color: var(--muted); font-size: 12.5px; }

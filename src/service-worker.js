@@ -10,8 +10,8 @@
 // then reconcile. Polling has a second benefit: the repeated API calls keep the worker
 // alive through a long restore.
 
-import { reconcileWindow } from "./reconcile.js";
-import { getSettings } from "./storage.js";
+import { reconcileWindow, preparePinForTab, removePinByIdentity, renamePinByIdentity, reorderPinsByIdentity, pinDisplayName } from "./reconcile.js";
+import { getPins, setPins, getSettings } from "./storage.js";
 
 const POLL_MS = 700; // gap between stability checks
 const MAX_SETTLE_MS = 20000; // stop waiting after this and reconcile anyway
@@ -91,21 +91,109 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch((e) => console.warn("[auto-pin] install error:", e));
 });
 
-// Toolbar button opens the management page.
-chrome.action.onClicked.addListener(() => {
-  chrome.runtime.openOptionsPage();
-});
+// --- Popup support -------------------------------------------------------------
+// The toolbar button opens popup.html (manifest action.default_popup), a thin view
+// that talks to this worker via messages so matcher/storage logic lives in one place.
 
-// Messages from the options page. "applyNow" reconciles the most recently focused normal
-// window so edits show up without opening a new window.
+function newId() {
+  return (crypto.randomUUID && crypto.randomUUID()) || "pin-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+// The tab behind the popup: the popup's own window is by definition last-focused.
+async function activeTab() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return (tabs && tabs[0]) || null;
+}
+
+async function getPopupState() {
+  const [tab, pins] = await Promise.all([activeTab(), getPins()]);
+  const rows = pins.map((p) => ({
+    id: p.id || "",
+    url: p.url,
+    match: p.match || "smart",
+    label: p.label || "",
+    name: pinDisplayName(p),
+  }));
+  // Incognito is rejected outright: a pin row would go into storage.sync and leak
+  // the URL across devices, and reconcile skips incognito windows anyway.
+  if (!tab || tab.incognito) {
+    return { ok: true, tab: { title: "", url: "", status: "no-tab" }, pins: rows };
+  }
+  const url = tab.url || tab.pendingUrl || "";
+  const state = { title: tab.title || "", url, status: "pinnable" };
+  const prep = preparePinForTab(pins, url, tab.title);
+  if (!prep.ok) {
+    state.status = prep.reason;
+    if (prep.existing) state.matchedName = pinDisplayName(prep.existing);
+  }
+  return { ok: true, tab: state, pins: rows };
+}
+
+async function pinCurrentTab() {
+  const tab = await activeTab();
+  if (!tab || tab.incognito) return { ok: false, reason: "no-tab" };
+  const url = tab.url || tab.pendingUrl || "";
+  const pins = await getPins(); // fresh read; never trust a cached list
+  const prep = preparePinForTab(pins, url, tab.title);
+  if (!prep.ok) return { ok: false, reason: prep.reason };
+  // Pin the tab FIRST: reconcile never pins an existing tab, it only avoids
+  // creating a second one next to it.
+  await chrome.tabs.update(tab.id, { pinned: true });
+  await setPins([...pins, { id: newId(), ...prep.pin }]);
+  await reconcileWindow(tab.windowId);
+  return { ok: true, pin: prep.pin };
+}
+
+// Messages from the popup and the options page. Every async branch returns true to
+// keep the response channel open.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg && msg.type === "applyNow") {
+  const type = msg && msg.type;
+  if (type === "applyNow") {
+    // Reconcile the most recently focused normal window so edits show up now.
     chrome.windows
       .getLastFocused({ windowTypes: ["normal"] })
       .then((w) => reconcileWindow(w.id))
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
-    return true; // keep the channel open for the async response
+    return true;
+  }
+  if (type === "getPopupState") {
+    getPopupState()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "pinCurrentTab") {
+    pinCurrentTab()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "removePin") {
+    getPins()
+      .then((pins) => setPins(removePinByIdentity(pins, msg.url, msg.match)))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "renamePin") {
+    // Display-only: no reconcile needed, matching never looks at labels.
+    getPins()
+      .then((pins) => setPins(renamePinByIdentity(pins, msg, msg.label)))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "reorderPins") {
+    // Save the new list order, then reconcile the window behind the popup so the
+    // actual pinned tabs move to match right away.
+    getPins()
+      .then((pins) => setPins(reorderPinsByIdentity(pins, msg.order)))
+      .then(() => chrome.windows.getLastFocused({ windowTypes: ["normal"] }))
+      .then((w) => reconcileWindow(w.id))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
   }
   return false;
 });

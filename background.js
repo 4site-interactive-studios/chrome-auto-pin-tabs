@@ -165,7 +165,6 @@ async function setSettings(patch) {
 
 
 // ===== from src/reconcile.js =====
-
 // reconcile.js
 // The heart of the extension. reconcileWindow brings a single window in line with the
 // configured pin list: it adds any pin that isn't already present, then (optionally)
@@ -280,6 +279,73 @@ function dedupePins(pins) {
     out.push(pin);
   }
   return out;
+}
+
+// Which existing pin (if any) already covers this URL, judged by each pin's OWN
+// match rule — the same test creation uses, so the popup's "Already a pin" state
+// can never disagree with what reconcile would do.
+function findPinForUrl(pins, url) {
+  if (isOpaque(url)) return null;
+  for (const pin of pins) {
+    const mode = pin.match || "smart";
+    if (keyFor(url, mode) === keyFor(pin.url, mode)) return pin;
+  }
+  return null;
+}
+
+// Decide whether a tab can become a new pin. Pure; id assignment stays with the caller.
+function preparePinForTab(pins, url, title) {
+  if (!/^https?:\/\//i.test(url || "")) return { ok: false, reason: "not-http" };
+  const existing = findPinForUrl(pins, url);
+  if (existing) return { ok: false, reason: "already-pin", existing };
+  return { ok: true, pin: { url, match: "smart", label: (title || "").slice(0, 40) } };
+}
+
+function removePinByIdentity(pins, url, match) {
+  const m = match || "smart";
+  return pins.filter((p) => !(p.url === url && (p.match || "smart") === m));
+}
+
+// Row matcher for popup-initiated edits: prefer the stable id when both sides have
+// one, else fall back to url + normalized match.
+function sameRow(pin, ref) {
+  if (ref.id && pin.id) return pin.id === ref.id;
+  return pin.url === ref.url && (pin.match || "smart") === (ref.match || "smart");
+}
+
+// Set (or clear, with an empty string) a pin's display label. Labels are cosmetic:
+// matching keys on the URL alone, so a rename can never change what a pin claims.
+function renamePinByIdentity(pins, ref, label) {
+  const next = pins.map((p) => ({ ...p }));
+  const target = next.find((p) => sameRow(p, ref));
+  if (target) target.label = (label || "").trim();
+  return next;
+}
+
+// Rearrange pins to match `order` (an array of {id?, url, match} refs). Rows the
+// order doesn't mention — a sync race adding a pin mid-drag — keep their relative
+// order and go to the end, so nothing is ever silently dropped.
+function reorderPinsByIdentity(pins, order) {
+  const remaining = pins.slice();
+  const out = [];
+  for (const ref of order || []) {
+    const i = remaining.findIndex((p) => sameRow(p, ref));
+    if (i >= 0) out.push(remaining.splice(i, 1)[0]);
+  }
+  return out.concat(remaining);
+}
+
+// Display name for a pin: label, else last path segment, else host. Mirrors the
+// options page's deriveName so the popup and the options page agree on names.
+function pinDisplayName(pin) {
+  if (pin.label) return pin.label;
+  try {
+    const u = new URL(pin.url);
+    const last = u.pathname.split("/").filter(Boolean).pop();
+    return last || u.host;
+  } catch {
+    return pin.url;
+  }
 }
 
 // Assign each pin the one open tab that represents it, across all pins at once. Three
@@ -539,6 +605,8 @@ async function reconcileAllWindows() {
 // alive through a long restore.
 
 
+
+
 const POLL_MS = 700; // gap between stability checks
 const MAX_SETTLE_MS = 20000; // stop waiting after this and reconcile anyway
 const RECHECK_MS = 3500; // after reconciling, one late pass to catch a duplicate that arrives after
@@ -617,21 +685,109 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch((e) => console.warn("[auto-pin] install error:", e));
 });
 
-// Toolbar button opens the management page.
-chrome.action.onClicked.addListener(() => {
-  chrome.runtime.openOptionsPage();
-});
+// --- Popup support -------------------------------------------------------------
+// The toolbar button opens popup.html (manifest action.default_popup), a thin view
+// that talks to this worker via messages so matcher/storage logic lives in one place.
 
-// Messages from the options page. "applyNow" reconciles the most recently focused normal
-// window so edits show up without opening a new window.
+function newId() {
+  return (crypto.randomUUID && crypto.randomUUID()) || "pin-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+// The tab behind the popup: the popup's own window is by definition last-focused.
+async function activeTab() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return (tabs && tabs[0]) || null;
+}
+
+async function getPopupState() {
+  const [tab, pins] = await Promise.all([activeTab(), getPins()]);
+  const rows = pins.map((p) => ({
+    id: p.id || "",
+    url: p.url,
+    match: p.match || "smart",
+    label: p.label || "",
+    name: pinDisplayName(p),
+  }));
+  // Incognito is rejected outright: a pin row would go into storage.sync and leak
+  // the URL across devices, and reconcile skips incognito windows anyway.
+  if (!tab || tab.incognito) {
+    return { ok: true, tab: { title: "", url: "", status: "no-tab" }, pins: rows };
+  }
+  const url = tab.url || tab.pendingUrl || "";
+  const state = { title: tab.title || "", url, status: "pinnable" };
+  const prep = preparePinForTab(pins, url, tab.title);
+  if (!prep.ok) {
+    state.status = prep.reason;
+    if (prep.existing) state.matchedName = pinDisplayName(prep.existing);
+  }
+  return { ok: true, tab: state, pins: rows };
+}
+
+async function pinCurrentTab() {
+  const tab = await activeTab();
+  if (!tab || tab.incognito) return { ok: false, reason: "no-tab" };
+  const url = tab.url || tab.pendingUrl || "";
+  const pins = await getPins(); // fresh read; never trust a cached list
+  const prep = preparePinForTab(pins, url, tab.title);
+  if (!prep.ok) return { ok: false, reason: prep.reason };
+  // Pin the tab FIRST: reconcile never pins an existing tab, it only avoids
+  // creating a second one next to it.
+  await chrome.tabs.update(tab.id, { pinned: true });
+  await setPins([...pins, { id: newId(), ...prep.pin }]);
+  await reconcileWindow(tab.windowId);
+  return { ok: true, pin: prep.pin };
+}
+
+// Messages from the popup and the options page. Every async branch returns true to
+// keep the response channel open.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg && msg.type === "applyNow") {
+  const type = msg && msg.type;
+  if (type === "applyNow") {
+    // Reconcile the most recently focused normal window so edits show up now.
     chrome.windows
       .getLastFocused({ windowTypes: ["normal"] })
       .then((w) => reconcileWindow(w.id))
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
-    return true; // keep the channel open for the async response
+    return true;
+  }
+  if (type === "getPopupState") {
+    getPopupState()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "pinCurrentTab") {
+    pinCurrentTab()
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "removePin") {
+    getPins()
+      .then((pins) => setPins(removePinByIdentity(pins, msg.url, msg.match)))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "renamePin") {
+    // Display-only: no reconcile needed, matching never looks at labels.
+    getPins()
+      .then((pins) => setPins(renamePinByIdentity(pins, msg, msg.label)))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (type === "reorderPins") {
+    // Save the new list order, then reconcile the window behind the popup so the
+    // actual pinned tabs move to match right away.
+    getPins()
+      .then((pins) => setPins(reorderPinsByIdentity(pins, msg.order)))
+      .then(() => chrome.windows.getLastFocused({ windowTypes: ["normal"] }))
+      .then((w) => reconcileWindow(w.id))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
   }
   return false;
 });

@@ -153,12 +153,48 @@ function render() {
     down.addEventListener("click", () => move(i, 1));
     moves.append(up, down);
 
-    // Body: name, url, match select + note
+    // Body: name (+ rename), url, match select + note
     const body = document.createElement("div");
     body.className = "body";
+    const nameRow = document.createElement("div");
+    nameRow.className = "name-row";
     const name = document.createElement("div");
     name.className = "name";
     name.textContent = deriveName(pin);
+    const rename = document.createElement("button");
+    rename.className = "icon";
+    rename.type = "button";
+    rename.textContent = "✎";
+    rename.title = "Rename";
+    rename.addEventListener("click", () => {
+      // The label is display-only; matching keys on the URL, never the name.
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "rename";
+      input.value = pin.label || "";
+      input.placeholder = deriveName({ ...pin, label: "" });
+      name.replaceWith(input);
+      rename.disabled = true;
+      input.focus();
+      input.select();
+      let done = false;
+      const finish = (commit) => {
+        if (done) return;
+        done = true;
+        if (commit && input.value.trim() !== (pin.label || "")) {
+          pin.label = input.value.trim(); // empty goes back to the automatic name
+          savePins().then(render);
+        } else {
+          render();
+        }
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") finish(true);
+        else if (e.key === "Escape") finish(false);
+      });
+      input.addEventListener("blur", () => finish(true));
+    });
+    nameRow.append(name, rename);
     const url = document.createElement("div");
     url.className = "url";
     url.textContent = pin.url;
@@ -174,7 +210,7 @@ function render() {
     note.textContent = describeMatch(pin.url, pin.match || "smart");
     meta.append(sel, note);
 
-    body.append(name, url, meta);
+    body.append(nameRow, url, meta);
 
     // Remove
     const remove = document.createElement("button");
@@ -303,6 +339,15 @@ function buildMatchDropdown() {
 async function init() {
   buildMatchDropdown();
   await loadState();
+
+  // Reflect pin changes made elsewhere (the toolbar popup, another synced machine)
+  // instead of clobbering them: without this, the module-level `pins` array goes
+  // stale and the next save here would write the removed pin right back.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "sync" && changes.pins) {
+      loadState().then(render);
+    }
+  });
 
   // Settings controls
   const applyMode = document.getElementById("applyMode");
