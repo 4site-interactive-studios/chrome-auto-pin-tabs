@@ -1,0 +1,9 @@
+# The extension's private signing key (pairs with the manifest "key" field).
+# Never commit it; build-store.mjs --first-upload also looks for it in ../
+key.pem
+
+# The first-upload store package embeds key.pem, so it must not be tracked either.
+dist/store-upload-first.zip
+
+# macOS folder metadata
+.DS_Store

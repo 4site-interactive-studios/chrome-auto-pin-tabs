@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2twH3+q2IGKh54griH23U2kkbLsREYff7jxK/ezl/XJPfTRCu/HJ92VtZuAqaR6VRPrp75UaqyCGp35iAdtq6sjvJ9x4GAuQPlt5PnnhXw+nPUHiSD465NED7vQCICpZ+tbWbq2Fn9GilVBeLMBP6a7iPc+FM4sI33Ltxmrh81gsLeWbBZaw6zXT4lTCSvmx5Vmd3dc86VURElQQDMoJj5j5lcUhaBPX2G9ysRqDNBSDUeZ3lX6b9m4fwPrg6ZL8SZ0l1ETkJlUNZ2muITg/OoRGqb5kKCiT+qO9FFWjYdk+rUsCN2/Sg6NJYZxra/3Qsy1glkPVoWA7kRdMy8OpzQIDAQAB",
   "name": "Auto Pin Tabs",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Pins a configured set of tabs in new windows, with smart per-app duplicate matching and restore cleanup.",
   "icons": {
     "16": "icons/icon16.png",

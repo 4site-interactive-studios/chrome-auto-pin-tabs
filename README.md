@@ -69,7 +69,7 @@ Three things keep the pinned set correct, in order.
 
 **Settling before acting.** Chrome restores a window's tabs asynchronously, so reconciling the instant a window appears can run before the restored pinned tabs come back, which is what produces duplicates. Instead of a fixed delay, the extension waits until a window has gone quiet for about 0.8 seconds with no new tabs, then reconciles once. A restore keeps firing tab events, which keep pushing that wait out, so it only acts after the restore finishes. The visible cost is that pins appear about a second after a window opens rather than instantly.
 
-**Cleanup.** On a restored window it removes any unpinned tab that is a copy of a pinned tab (Chrome's own restore-twin bug), and collapses any pinned tabs that share an identical URL, keeping the leftmost. All comparisons here are on the full URL, so only true identical copies are removed, never a different view that shares a path.
+**Cleanup.** On a restored window it removes any unpinned tab that is an identical copy of a pinned tab (Chrome's own restore-twin bug), then collapses duplicate pinned tabs. Duplicate detection uses the same claim logic as creation: each configured pin keeps exactly one pinned tab (exact URL first, then the pin's match rule, then a same-origin drifted tab), and a second pinned tab is removed only when it is an identical copy of a kept pinned tab, or matches a pin — or that pin's kept tab — under the pin's own match rule. So a duplicate that navigated (an open email thread, a Slack thread) still collapses, but merely sharing a site with a pin is never enough: a second pinned Slack channel, another Google account, or any other same-site page you pinned yourself stays. Unpinned tabs are only ever removed on an identical full URL, so a regular tab you're browsing in never matches, and blank still-loading tabs are always left alone.
 
 **Reorder.** Finally it arranges the pinned tabs to match your list: configured pins first in list order, then any manually pinned tabs after, keeping their relative order. It's skipped when the order is already correct, so a window that's fine is never disturbed.
 
@@ -115,9 +115,10 @@ src/storage.js          pins and settings, with defaults and seed pins
 src/reconcile.js        add missing pins, clean duplicates, reorder
 src/service-worker.js   quiescence scheduler and event listeners
 test/matcher.test.mjs   matching across the profiles and match types
-test/cleanup.test.mjs   twin removal and duplicate collapse
+test/cleanup.test.mjs   claim-based duplicate detection (findDuplicateTabIds)
 test/order.test.mjs     final pinned-tab ordering
 test/drift.test.mjs     drift-tolerant pin-to-tab assignment
+test/reconcile.test.mjs reconcileWindow against a mocked chrome (window targeting, idempotence)
 build.mjs               regenerates background.js from src/
 package.json            npm test and npm run build
 ```
@@ -148,6 +149,7 @@ For Chrome Web Store packaging, `node build-store.mjs` produces `dist/store-uplo
 
 ## Version history
 
+- **0.7.1** Duplicate-pin fixes: created tabs now target the window being reconciled (previously they landed in the focused window, so a multi-window restore piled every window's pin set into one window), and cleanup now collapses duplicates by each pin's own match rule instead of exact URL only, so a duplicate that navigated is still removed. Cleanup never removes a same-site pinned tab the matcher treats as distinct (a second Slack channel, another Google account), never touches blank still-loading tabs, and no longer acts on a stale snapshot if the window closes mid-pass.
 - **0.7.0** Store readiness: icon set (16/32/48/128) wired into the manifest and toolbar, privacy policy, store packaging script, and submission notes.
 - **0.6.0** Drift-tolerant matching: a pinned tab you've navigated around in still counts as its pin (same-origin claiming), so restores no longer duplicate drifted tabs. Removed the hardcoded seed pins; an empty list now stays empty until sync delivers it or you add pins.
 - **0.5.0** Stability-polling scheduler: reconcile waits until a window's tab set stops changing, with a delayed cleanup-only recheck.

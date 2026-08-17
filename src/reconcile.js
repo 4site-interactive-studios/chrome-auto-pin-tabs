@@ -1,4 +1,4 @@
-import { keyFor } from "./matcher.js";
+import { keyFor, detectApp } from "./matcher.js";
 import { getPins, getSettings } from "./storage.js";
 
 // reconcile.js
@@ -25,10 +25,10 @@ function tabUrl(tab) {
 // Create a pinned tab, retrying through the brief window where Chrome refuses edits
 // because the user is mid tab-drag. Other errors are logged and swallowed so one bad
 // pin can't abort the whole pass.
-function createPinned(url, index) {
+function createPinned(windowId, url, index) {
   return new Promise((resolve) => {
     const attempt = () => {
-      chrome.tabs.create({ url, pinned: true, index, active: false }, () => {
+      chrome.tabs.create({ windowId, url, pinned: true, index, active: false }, () => {
         const err = chrome.runtime.lastError;
         if (err && DRAG_ERROR.test(err.message || "")) {
           setTimeout(attempt, CREATE_RETRY_MS);
@@ -78,6 +78,45 @@ function originOf(url) {
   }
 }
 
+// True when a URL gives us nothing solid to compare: empty (tab still loading),
+// unparseable, or an opaque origin. WHATWG URL serializes opaque origins (about:blank,
+// data:, chrome://) as the STRING "null", not the value null, so both must be checked.
+function isOpaque(url) {
+  const o = originOf(url);
+  return !url || o === null || o === "null";
+}
+
+// A pin row's identity, with the mode label canonicalized: "smart" resolves to the
+// concrete profile keyFor will actually use, so {match:"smart"} and {match:"path"}
+// rows for the same non-app URL count as ONE pin instead of two. Rows with the same
+// identity would create and claim the same tabs, so everywhere we reason about "which
+// pins exist" must see them as one — otherwise the extra row both creates a duplicate
+// and shields it from cleanup.
+function pinIdentity(pin) {
+  const mode = pin.match || "smart";
+  let resolved = mode;
+  if (mode === "smart") {
+    try {
+      resolved = detectApp(new URL(pin.url).host);
+    } catch {
+      resolved = "path";
+    }
+  }
+  return resolved + "::" + keyFor(pin.url, mode);
+}
+
+export function dedupePins(pins) {
+  const seen = new Set();
+  const out = [];
+  for (const pin of pins) {
+    const id = pinIdentity(pin);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(pin);
+  }
+  return out;
+}
+
 // Assign each pin the one open tab that represents it, across all pins at once. Three
 // passes, strictest first, each tab claimable once:
 //   1) exact full URL
@@ -111,6 +150,7 @@ export function assignPinsToTabs(pins, tabs) {
   }
   for (const pin of pins) {
     if (byPin.has(pin)) continue;
+    if (isOpaque(pin.url)) continue; // opaque origins all serialize to "null"; never drift-match
     const po = originOf(pin.url);
     if (!po) continue;
     const t = tabs.find((t) => !claimed.has(t.id) && t.pinned && originOf(tabUrl(t)) === po);
@@ -120,6 +160,74 @@ export function assignPinsToTabs(pins, tabs) {
     }
   }
   return byPin;
+}
+
+// Decide which tabs are duplicates of the configured pins. Built on the same assignment
+// as creation, with two deliberate differences:
+//   - duplicate pin rows collapse to one identity first (dedupePins), so a repeated or
+//     equivalently-moded row can't shield a second tab
+//   - claiming runs over PINNED tabs only. An unpinned tab may satisfy a pin for
+//     creation purposes, but it must never out-claim the pinned tab that cleanup is
+//     about to judge — otherwise the user's real pinned tab gets closed in favor of a
+//     regular tab they happen to have open at the pin's URL.
+// Pinned tabs are decided first, in index order:
+//   - blank/still-loading/opaque-URL tabs (about:blank included) are never touched
+//   - a pinned tab is removed if it shares an exact URL with a pinned tab already kept
+//     (true identical copies, any origin, claimed or not — same rule the old cleanup
+//     had), or, when unclaimed, if it matches a pin by the pin's own match rule or
+//     matches the pin's claimed tab by that rule (a twin of a drifted pin). Merely
+//     sharing an ORIGIN with a pin is NOT enough: a second Slack channel, another
+//     Gmail account, or another page someone pinned on the same site is a deliberate
+//     pin the matcher itself treats as distinct.
+// Then UNPINNED tabs are compared against the KEPT pinned tabs only, and removed only
+// as an exact-URL copy of one (Chrome's restore-twin bug). Comparing against kept tabs
+// — not all pinned tabs — means removing a pinned duplicate can never drag an unpinned
+// twin down with it and leave the URL open nowhere; and an unpinned tab you're merely
+// browsing in never matches anything but its exact twin.
+export function findDuplicateTabIds(pins, tabs) {
+  const uniquePins = dedupePins(pins);
+
+  const ordered = tabs.slice().sort((a, b) => a.index - b.index);
+  const pinnedTabs = ordered.filter((t) => t.pinned);
+  const byPin = assignPinsToTabs(uniquePins, pinnedTabs);
+  const claimed = new Set();
+  for (const t of byPin.values()) claimed.add(t.id);
+
+  const remove = [];
+  const keptExact = new Set(); // exact keys of pinned tabs we are keeping
+  for (const t of pinnedTabs) {
+    const url = tabUrl(t);
+    if (isOpaque(url)) continue; // nothing solid to compare: leave alone
+    const exactKey = keyFor(url, "exact");
+    if (keptExact.has(exactKey)) {
+      remove.push(t.id); // identical copy of a pinned tab we already kept
+      continue;
+    }
+    if (claimed.has(t.id)) {
+      keptExact.add(exactKey);
+      continue;
+    }
+    const isDupe = uniquePins.some((pin) => {
+      if (exactKey === keyFor(pin.url, "exact")) return true;
+      const mode = pin.match || "smart";
+      if (keyFor(url, mode) === keyFor(pin.url, mode)) return true;
+      const c = byPin.get(pin);
+      return !!c && keyFor(url, mode) === keyFor(tabUrl(c), mode);
+    });
+    if (isDupe) {
+      remove.push(t.id);
+      continue;
+    }
+    keptExact.add(exactKey);
+  }
+
+  for (const t of ordered) {
+    if (t.pinned) continue;
+    const url = tabUrl(t);
+    if (isOpaque(url)) continue;
+    if (keptExact.has(keyFor(url, "exact"))) remove.push(t.id);
+  }
+  return remove;
 }
 
 // Work out the order pinned tabs SHOULD be in: configured pins first, in list order,
@@ -144,7 +252,11 @@ export async function reconcileWindow(windowId, opts = {}) {
   if (inFlight.has(windowId)) return;
   inFlight.add(windowId);
   try {
-    const [pins, settings] = await Promise.all([getPins(), getSettings()]);
+    const [rawPins, settings] = await Promise.all([getPins(), getSettings()]);
+    // Collapse duplicate/equivalent pin rows ONCE, so creation, cleanup, and reorder
+    // all agree on which pins exist. A leftover duplicate row here would create a
+    // second tab, shield it from cleanup, and let its drift pass hijack the reorder.
+    const pins = dedupePins(rawPins);
     if (!pins.length) return;
 
     let win;
@@ -171,55 +283,50 @@ export async function reconcileWindow(windowId, opts = {}) {
     // recreating a pin the user may have deliberately closed in the meantime.
     if (!opts.skipCreate) {
       const byPin = assignPinsToTabs(pins, tabsAtStart);
-      const createdThisPass = new Set(); // "mode::key" created, dedupes identical rows
+      // Exact URLs already open in this window. Two rows can legitimately share one
+      // URL under different modes (an Exact row and a Path row); the first row claims
+      // or creates the tab, and the second must not add a byte-identical copy.
+      const urlTaken = new Set();
+      for (const t of tabsAtStart) {
+        const u = tabUrl(t);
+        if (!isOpaque(u)) urlTaken.add(keyFor(u, "exact"));
+      }
+      const createdThisPass = new Set(); // canonical identities created this pass
       let index = 0;
       for (const pin of pins) {
-        const mode = pin.match || "smart";
-        const composite = mode + "::" + keyFor(pin.url, mode);
-        if (byPin.has(pin) || createdThisPass.has(composite)) {
+        const composite = pinIdentity(pin);
+        const urlKey = keyFor(pin.url, "exact");
+        if (byPin.has(pin) || createdThisPass.has(composite) || urlTaken.has(urlKey)) {
           index++; // already here (restored, drifted, or duplicate row): hold its slot
           continue;
         }
-        await createPinned(pin.url, index);
+        await createPinned(windowId, pin.url, index);
         createdThisPass.add(composite);
+        urlTaken.add(urlKey);
         index++;
       }
     }
 
     // 2) Re-query so we see the restored tabs plus anything we just created. Then clean
-    // up duplicates (restore-scoped) and, finally, put every pinned tab back into the
-    // order defined by the pin list. All URL comparisons here are exact, so only true
-    // identical copies are ever removed.
+    // up duplicates and, finally, put every pinned tab back into the order defined by
+    // the pin list. Cleanup is claim-based — see findDuplicateTabIds for exactly what
+    // may be removed. If the window disappeared mid-pass there is nothing to clean or
+    // reorder; never fall back to the stale pre-create snapshot, whose tab ids may by
+    // now live in a different window (tab ids are global, so removing by a stale id
+    // could close a tab the user dragged elsewhere).
     let after;
     try {
       after = await chrome.windows.get(windowId, { populate: true });
     } catch {
-      after = null;
+      return; // window closed mid-reconcile
     }
-    const tabs2 = (after && after.tabs) || tabsAtStart;
+    const tabs2 = after.tabs || [];
     const removed = new Set();
 
     if (settings.cleanupTwins && (arrivedWithPinned || opts.skipCreate)) {
-      const pinnedNow = tabs2.filter((t) => t.pinned);
-      const pinnedUrls = new Set(pinnedNow.map((t) => keyFor(tabUrl(t), "exact")));
-
-      // (a) Unpinned copy of a pinned tab (Chrome's restore-twin bug).
-      for (const t of tabs2) {
-        if (!t.pinned && pinnedUrls.has(keyFor(tabUrl(t), "exact"))) {
-          await removeTab(t.id);
-          removed.add(t.id);
-        }
-      }
-      // (b) Duplicate pinned tabs with the same URL: keep the leftmost.
-      const seen = new Set();
-      for (const t of pinnedNow.slice().sort((a, b) => a.index - b.index)) {
-        const k = keyFor(tabUrl(t), "exact");
-        if (seen.has(k)) {
-          await removeTab(t.id);
-          removed.add(t.id);
-        } else {
-          seen.add(k);
-        }
+      for (const id of findDuplicateTabIds(pins, tabs2)) {
+        await removeTab(id);
+        removed.add(id);
       }
     }
 
