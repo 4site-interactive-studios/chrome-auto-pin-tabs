@@ -315,6 +315,41 @@ export function desiredPinnedOrder(pins, pinnedTabs) {
   return ordered;
 }
 
+// True when this window already has the pins, for the user's chosen definition of
+// "already has them":
+//   "all" (default) -> a PINNED tab for every pin. Missing one means not covered, so the
+//                      next window gets the full set.
+//   "any"           -> a PINNED tab for even one pin is enough. Only a window where all
+//                      of them are missing gets pinned.
+// Judged with the same assignment creation uses (exact -> the pin's own mode ->
+// drift-tolerant origin), so a Gmail tab that has wandered to another thread still
+// counts as covering its pin. Restricted to pinned tabs on purpose: a regular tab you
+// happen to have open at a pin's URL is not the same as having the pin set up there.
+export function windowCoversPins(pins, tabs, mode = "all") {
+  if (!pins.length) return false;
+  const pinned = (tabs || []).filter((t) => t.pinned);
+  if (!pinned.length) return false;
+  if (mode !== "any" && pinned.length < pins.length) return false;
+  const byPin = assignPinsToTabs(pins, pinned);
+  return mode === "any" ? pins.some((p) => byPin.has(p)) : pins.every((p) => byPin.has(p));
+}
+
+// The id of some OTHER normal window that already covers the pins, or null. Used by the
+// skipWhenCovered setting to leave secondary windows alone.
+export async function findCoveringWindow(pins, excludeWindowId, mode = "all") {
+  let wins;
+  try {
+    wins = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] });
+  } catch {
+    return null;
+  }
+  for (const w of wins || []) {
+    if (w.id === excludeWindowId || w.incognito || w.type !== "normal") continue;
+    if (windowCoversPins(pins, w.tabs || [], mode)) return w.id;
+  }
+  return null;
+}
+
 export async function reconcileWindow(windowId, opts = {}) {
   if (inFlight.has(windowId)) return;
   inFlight.add(windowId);
@@ -348,7 +383,19 @@ export async function reconcileWindow(windowId, opts = {}) {
     // opts.skipCreate is used by the late-restore recheck: it re-runs cleanup and
     // reorder to catch a duplicate that materialized after the first pass, without
     // recreating a pin the user may have deliberately closed in the meantime.
-    if (!opts.skipCreate) {
+    //
+    // `covered` is the skipWhenCovered setting: another window already has the pins (to
+    // the degree settings.coverageMode requires), so leave this one bare. It suppresses
+    // creation ONLY — cleanup and reorder below still run, so a covered window that does
+    // hold pinned tabs is still tidied. opts.force is the escape hatch for deliberate
+    // user actions ("Apply to this window", and the handoff after a covering window closes).
+    const covered =
+      !opts.skipCreate &&
+      !opts.force &&
+      settings.skipWhenCovered &&
+      (await findCoveringWindow(pins, windowId, settings.coverageMode)) !== null;
+
+    if (!opts.skipCreate && !covered) {
       const byPin = assignPinsToTabs(pins, tabsAtStart);
       // Exact URLs already open in this window. Two rows can legitimately share one
       // URL under different modes (an Exact row and a Path row); the first row claims

@@ -18,6 +18,7 @@ function makeChrome({ pins, windows, focusedWindowId }) {
     nextId: 1000,
     log: [],
   };
+  const shape = (w) => ({ id: w.id, type: "normal", incognito: false, tabs: w.tabs });
   globalThis.chrome = {
     runtime: { lastError: undefined },
     storage: { sync: { get: async (key) => (key === "pins" ? { pins } : { settings: {} }) } },
@@ -25,8 +26,10 @@ function makeChrome({ pins, windows, focusedWindowId }) {
       get: async (id) => {
         const w = state.windows.get(id);
         if (!w) throw new Error("no such window");
-        return { id: w.id, type: "normal", incognito: false, tabs: w.tabs };
+        return shape(w);
       },
+      // Needed by the coverage check behind skipWhenCovered, which is on by default.
+      getAll: async () => [...state.windows.values()].map(shape),
     },
     tabs: {
       create: (opts, cb) => {
