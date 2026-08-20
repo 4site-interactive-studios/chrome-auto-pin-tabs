@@ -35,7 +35,7 @@ The `manifest.json` includes a `key` field. That fixes the extension ID (`cdplkg
 
 **Add a pin.** Paste a URL, pick a match type, and optionally give it a label. A live note tells you how it will match before you save. "Import open pinned tabs" seeds the list from whatever you already have pinned. "Apply to this window" pushes your current pins into the window you're in, so you can see changes without opening a new one.
 
-**Settings.** When to pin, and whether to clean up Chrome's restore duplicates.
+**Settings.** When to pin, whether to clean up Chrome's restore duplicates, and whether to keep the pinned tabs to a single window (and how strictly that's judged).
 
 ## How matching works
 
@@ -78,6 +78,12 @@ Three things keep the pinned set correct, in order.
 **When to pin.** "On startup and every new window" (the default) pins at cold start and on each new normal window. "On startup only" pins at cold start and leaves windows you open later alone.
 
 **Remove Chrome's duplicate copies after a restore.** On by default. Controls the cleanup step above. Leave it on unless you have a reason not to.
+
+**Keep the pinned tabs to one window.** On by default. A window is left bare if some *other* normal window already has the pins — so the set stays in the one window you work in all day instead of following every `Ctrl+N`. Coverage is judged with the same match rules as everything else, so a pinned tab you've navigated around in still counts, and an *unpinned* tab sitting at a pin's URL doesn't. This applies to new windows *and* the cold-start sweep; "Apply to this window" always overrides it. Turn it off to put the full set in every window.
+
+**Count a window as already having them when it has…** Only consulted when the setting above is on. "Every pinned tab" (the default) is strict: if the other window is missing even one pin, the next window gets the full set. "At least one pinned tab" is loose: one pin over there is enough, so a window only gets pinned when *all* of them are missing everywhere else. Pick the loose one if you regularly close a pin or two out of your main window and don't want that to trigger a fresh set in the next window.
+
+**If that window closes, add the pinned tabs to another open window.** On by default, but only consulted when "keep the pinned tabs to one window" is on. When the window holding the pins closes and no other window covers them, the pins go into whichever window you're looking at now. Turn it off to have the pins simply disappear until you open a new window or restart.
 
 Settings and pins are stored under the `pins` and `settings` keys in `chrome.storage.sync`.
 

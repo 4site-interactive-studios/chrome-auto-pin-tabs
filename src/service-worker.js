@@ -10,13 +10,14 @@
 // then reconcile. Polling has a second benefit: the repeated API calls keep the worker
 // alive through a long restore.
 
-import { reconcileWindow, preparePinForTab, removePinByIdentity, renamePinByIdentity, reorderPinsByIdentity, pinDisplayName } from "./reconcile.js";
+import { reconcileWindow, preparePinForTab, removePinByIdentity, renamePinByIdentity, reorderPinsByIdentity, pinDisplayName, findCoveringWindow, dedupePins } from "./reconcile.js";
 import { getPins, setPins, getSettings } from "./storage.js";
 
 const POLL_MS = 700; // gap between stability checks
 const MAX_SETTLE_MS = 20000; // stop waiting after this and reconcile anyway
 const RECHECK_MS = 3500; // after reconciling, one late pass to catch a duplicate that arrives after
 const settling = new Set(); // windowIds currently being settled, so we don't stack loops
+const HANDOFF_MS = 1200; // let a quit or a multi-window close finish before reacting to it
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,6 +92,27 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch((e) => console.warn("[auto-pin] install error:", e));
 });
 
+// A window closed. Only interesting under skipWhenCovered: if the window that was
+// holding the pins is gone and nothing else covers them, hand the set to the window the
+// user is now looking at. No-op for everyone else, so default behavior is unchanged.
+// The delay lets a browser quit (or a burst of closes) finish first; during shutdown
+// getLastFocused rejects and the catch swallows it.
+chrome.windows.onRemoved.addListener((closedId) => {
+  getSettings()
+    .then(async ({ skipWhenCovered, repinOnClose, coverageMode }) => {
+      if (!skipWhenCovered || !repinOnClose) return;
+      await delay(HANDOFF_MS);
+      const pins = dedupePins(await getPins());
+      if (!pins.length) return;
+      if ((await findCoveringWindow(pins, closedId, coverageMode)) !== null) return; // still covered
+      const w = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+      if (!w || w.incognito || w.type !== "normal") return;
+      // force: by definition nothing covers right now, and this is a deliberate handoff.
+      await reconcileWindow(w.id, { force: true });
+    })
+    .catch((e) => console.warn("[auto-pin] handoff error:", e));
+});
+
 // --- Popup support -------------------------------------------------------------
 // The toolbar button opens popup.html (manifest action.default_popup), a thin view
 // that talks to this worker via messages so matcher/storage logic lives in one place.
@@ -152,7 +174,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // Reconcile the most recently focused normal window so edits show up now.
     chrome.windows
       .getLastFocused({ windowTypes: ["normal"] })
-      .then((w) => reconcileWindow(w.id))
+      .then((w) => reconcileWindow(w.id, { force: true }))
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;

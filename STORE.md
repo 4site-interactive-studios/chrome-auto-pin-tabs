@@ -44,7 +44,10 @@ copies of pinned tabs and puts everything back in your configured order.
 
 Configuration lives in the options page: add pins by URL or import your currently
 pinned tabs, reorder them, choose how each one matches, and pick whether pinning
-happens on every new window or only at startup. Settings sync across your signed-in
+happens on every new window or only at startup. If you only want the set in your main
+window, "keep the pinned tabs to one window" (on by default) leaves new windows bare
+for as long as another window still has the pins — strictly (it needs all of them) or
+loosely (one is enough), your choice. Turn it off to put the set in every window. Settings sync across your signed-in
 Chrome browsers. The extension makes no network requests and collects nothing.
 
 ## Privacy tab

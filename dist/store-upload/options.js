@@ -43,7 +43,7 @@ const MATCH_DESCRIPTIONS = {
   domain: "Matches any page on this site.",
 };
 
-const DEFAULTS = { applyMode: "startup_and_new", cleanupTwins: true };
+const DEFAULTS = { applyMode: "startup_and_new", cleanupTwins: true, skipWhenCovered: true, coverageMode: "all", repinOnClose: true };
 
 function detectApp(host) {
   return APP_HOSTS[(host || "").toLowerCase()] || "path";
@@ -361,6 +361,39 @@ async function init() {
   cleanup.checked = settings.cleanupTwins !== false;
   cleanup.addEventListener("change", () => {
     settings.cleanupTwins = cleanup.checked;
+    saveSettings().then(() => toast("Saved"));
+  });
+
+  // Single-window mode, plus its two sub-options. The sub-options keep their stored
+  // values but are inert (and shown greyed) while the parent is off, so they can't read
+  // as active.
+  const skip = document.getElementById("skipWhenCovered");
+  const coverage = document.getElementById("coverageMode");
+  const coverageRow = document.getElementById("coverageModeRow");
+  const repin = document.getElementById("repinOnClose");
+  const repinRow = document.getElementById("repinOnCloseRow");
+  function syncSubEnabled() {
+    const off = !skip.checked;
+    coverage.disabled = off;
+    repin.disabled = off;
+    coverageRow.classList.toggle("disabled", off);
+    repinRow.classList.toggle("disabled", off);
+  }
+  skip.checked = settings.skipWhenCovered === true;
+  coverage.value = settings.coverageMode === "any" ? "any" : "all";
+  repin.checked = settings.repinOnClose !== false;
+  syncSubEnabled();
+  skip.addEventListener("change", () => {
+    settings.skipWhenCovered = skip.checked;
+    syncSubEnabled();
+    saveSettings().then(() => toast("Saved"));
+  });
+  coverage.addEventListener("change", () => {
+    settings.coverageMode = coverage.value;
+    saveSettings().then(() => toast("Saved"));
+  });
+  repin.addEventListener("change", () => {
+    settings.repinOnClose = repin.checked;
     saveSettings().then(() => toast("Saved"));
   });
 

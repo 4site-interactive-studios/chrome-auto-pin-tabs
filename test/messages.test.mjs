@@ -14,6 +14,10 @@ const state = {
   nextId: 1000,
   log: [],
   messageHandler: null,
+  removedHandler: null,
+  // The handler tests below predate single-window mode; keep it off so they exercise
+  // plain reconcile behavior. The handoff tests at the bottom set their own settings.
+  settings: { skipWhenCovered: false },
 };
 
 globalThis.chrome = {
@@ -25,8 +29,9 @@ globalThis.chrome = {
   },
   windows: {
     onCreated: { addListener: () => {} },
-    getAll: async () => [],
-    getLastFocused: async () => ({ id: 1 }),
+    onRemoved: { addListener: (fn) => (state.removedHandler = fn) },
+    getAll: async () => [...state.windows.values()].map((w) => ({ id: w.id, type: "normal", incognito: false, tabs: w.tabs })),
+    getLastFocused: async () => ({ id: 1, type: "normal", incognito: false }),
     get: async (id) => {
       const w = state.windows.get(id);
       if (!w) throw new Error("no such window");
@@ -35,7 +40,7 @@ globalThis.chrome = {
   },
   storage: {
     sync: {
-      get: async (key) => (key === "pins" ? { pins: state.pins } : { settings: {} }),
+      get: async (key) => (key === "pins" ? { pins: state.pins } : { settings: state.settings }),
       set: async (obj) => { if (obj.pins) state.pins = obj.pins; },
     },
   },
@@ -171,6 +176,71 @@ const DASH = "https://example.com/dash";
 {
   const returned = state.messageHandler({ type: "nonsense" }, {}, () => {});
   eq("unknown type returns false", returned, false);
+}
+
+// --- Handoff after the covering window closes ---------------------------------------
+// windows.onRemoved is a no-op unless skipWhenCovered AND repinOnClose are both on. The
+// handler waits HANDOFF_MS (1.2s) before deciding, so each case sleeps past that.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function closeWindow(id) {
+  state.windows.delete(id);
+  state.removedHandler(id);
+  await sleep(1500);
+}
+
+function resetHandoff({ settings }) {
+  state.settings = settings;
+  state.pins = [{ url: DASH, match: "smart" }];
+  state.windows = new Map([[1, { id: 1, tabs: [{ id: 10, index: 0, url: "chrome://newtab/", pinned: false }] }]]);
+  state.windows.set(2, { id: 2, tabs: [{ id: 20, index: 0, url: DASH, pinned: true }] });
+  state.log = [];
+}
+
+// Parent setting off: closing the covering window changes nothing.
+{
+  resetHandoff({ settings: { skipWhenCovered: false } });
+  await closeWindow(2);
+  eq("handoff needs skipWhenCovered", state.log, []);
+}
+
+// Out of the box (no stored settings) both are on, so the handoff runs.
+{
+  resetHandoff({ settings: {} });
+  await closeWindow(2);
+  eq("handoff is on by default", state.log, [`create:1:${DASH}`]);
+}
+
+// Sub-option off: parent on, but the user declined the handoff.
+{
+  resetHandoff({ settings: { skipWhenCovered: true, repinOnClose: false } });
+  await closeWindow(2);
+  eq("handoff respects repinOnClose:false", state.log, []);
+}
+
+// Both on and nothing covers any more: the last-focused window gets the set.
+{
+  resetHandoff({ settings: { skipWhenCovered: true } });
+  await closeWindow(2);
+  eq("handoff pins the remaining window", state.log, [`create:1:${DASH}`]);
+}
+
+// Both on but another window still covers: leave everything alone.
+{
+  resetHandoff({ settings: { skipWhenCovered: true } });
+  state.windows.set(3, { id: 3, tabs: [{ id: 30, index: 0, url: DASH, pinned: true }] });
+  await closeWindow(2);
+  eq("handoff is a no-op while another window covers", state.log, []);
+}
+
+// The handoff asks the same coverage question the skip does, so it must honor
+// coverageMode: under "any" a window holding just one of two pins still counts.
+{
+  const OTHER = "https://example.com/other";
+  resetHandoff({ settings: { skipWhenCovered: true, coverageMode: "any" } });
+  state.pins = [{ url: DASH, match: "smart" }, { url: OTHER, match: "smart" }];
+  state.windows.set(3, { id: 3, tabs: [{ id: 30, index: 0, url: DASH, pinned: true }] });
+  await closeWindow(2);
+  eq("handoff honors coverageMode any", state.log, []);
 }
 
 console.log(`Message tests: ${pass} passed, ${fail} failed`);
