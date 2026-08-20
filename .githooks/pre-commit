@@ -1,0 +1,47 @@
+#!/bin/sh
+# Keeps the shippable build in lockstep with the source, on every commit.
+#
+# background.js and dist/ are GENERATED but TRACKED, so they can silently fall behind
+# the source they came from -- that is exactly how a v0.9.0 store-upload.zip once got
+# committed next to a v0.10.0 manifest. This hook rebuilds them whenever a commit
+# touches anything the build reads, and stages the result into that same commit.
+#
+# Installed via core.hooksPath (see the "prepare" script in package.json), so a fresh
+# clone picks it up with `npm install` rather than needing a manual copy.
+#
+# Escape hatch: `git commit --no-verify` skips this entirely.
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# The version lives in two files and both are published surfaces. Check it whenever
+# EITHER moves -- gating this behind the rebuild trigger below would let a lone
+# package.json bump slip through unchecked.
+if echo "$STAGED" | grep -Eq '^(manifest|package)\.json$'; then
+  MANIFEST_V=$(node -p "require('./manifest.json').version")
+  PKG_V=$(node -p "require('./package.json').version")
+  if [ "$MANIFEST_V" != "$PKG_V" ]; then
+    echo "pre-commit: version mismatch -- manifest.json is $MANIFEST_V, package.json is $PKG_V." >&2
+    echo "            Set both to the version you intend to ship, then commit again." >&2
+    exit 1
+  fi
+fi
+
+# Only rebuild when a build input is actually part of this commit. Docs-only or
+# test-only commits should not have to pay for a rebuild.
+INPUTS='^(src/|icons/|manifest\.json$|options\.(html|js)$|popup\.(html|js)$|build(-store)?\.mjs$|background\.js$)'
+if ! echo "$STAGED" | grep -Eq "$INPUTS"; then
+  exit 0
+fi
+
+MANIFEST_V=$(node -p "require('./manifest.json').version")
+
+echo "pre-commit: rebuilding background.js + store package (v$MANIFEST_V)..."
+node build-store.mjs >/dev/null
+
+# The build is reproducible, so these are no-ops unless something genuinely changed.
+git add background.js dist/store-upload dist/store-upload.zip
+
+echo "pre-commit: build staged and up to date."

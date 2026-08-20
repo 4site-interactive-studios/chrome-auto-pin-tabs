@@ -130,7 +130,9 @@ test/reconcile.test.mjs reconcileWindow against a mocked chrome (window targetin
 test/popup-logic.test.mjs  findPinForUrl / preparePinForTab / removePinByIdentity
 test/messages.test.mjs  service-worker message handlers against a mocked chrome
 build.mjs               regenerates background.js from src/
-package.json            npm test and npm run build
+build-store.mjs         builds dist/store-upload/ and dist/store-upload.zip
+.githooks/pre-commit    rebuilds and stages the generated files on every commit
+package.json            npm test, npm run build, npm run build:store
 ```
 
 Run the tests with Node 18 or newer:
@@ -145,7 +147,19 @@ After changing anything under `src/`, regenerate the shipped worker:
 npm run build
 ```
 
-For Chrome Web Store packaging, `node build-store.mjs` produces `dist/store-upload.zip` (runtime files only, manifest `key` field stripped), and `node build-store.mjs --first-upload` additionally bundles `key.pem` so the initial upload keeps the extension ID. `STORE.md` has the full submission walkthrough and paste-ready dashboard answers; `PRIVACY.md` is the privacy policy the listing links to.
+### Generated files stay in sync automatically
+
+`background.js`, `dist/store-upload/`, and `dist/store-upload.zip` are all generated but tracked, so they can silently fall behind their source — that is how a v0.9.0 store zip once got committed alongside a v0.10.0 manifest. A tracked pre-commit hook now prevents it: any commit touching a build input (`src/`, `manifest.json`, `options.*`, `popup.*`, `icons/`, either build script) rebuilds all three and stages them into that same commit. It also refuses the commit if `manifest.json` and `package.json` disagree on the version, since both are published surfaces.
+
+Install it once per clone — `npm install` does this via the `prepare` script, or run it directly:
+
+```
+git config core.hooksPath .githooks
+```
+
+`git commit --no-verify` bypasses the hook if you ever need to. The store archive is built reproducibly (fixed mtimes, sorted entries, `zip -X`), so an unchanged build produces byte-identical output and the hook never creates spurious diffs.
+
+For Chrome Web Store packaging, `npm run build:store` produces both `dist/store-upload/` (unpacked, for loading locally) and `dist/store-upload.zip` (runtime files only, manifest `key` field stripped) from a single staging pass — never hand-edit the unpacked directory, run the build. `node build-store.mjs --first-upload` additionally bundles `key.pem` so the initial upload keeps the extension ID. `STORE.md` has the full submission walkthrough and paste-ready dashboard answers; `PRIVACY.md` is the privacy policy the listing links to.
 
 `build.mjs` concatenates the four source modules with their `import` and `export` lines stripped, which keeps the shipped file a single classic service worker (no module loading to break) while the matcher inside it stays identical to the tested source. Never commit `key.pem` (the private key pairing with the manifest `key` field); `.gitignore` covers it.
 

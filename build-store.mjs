@@ -7,8 +7,10 @@
 // What it does, and why:
 // - Regenerates background.js from src/ first (same as `npm run build`), so the
 //   uploaded worker always matches the source.
-// - Copies ONLY runtime files: manifest.json, background.js, options.html, options.js,
-//   icons/. No src/, no test/, no git metadata: the store zip is the shippable subset.
+// - Stages ONLY runtime files into dist/store-upload/: manifest.json, background.js,
+//   options.html, options.js, popup.*, icons/. No src/, no test/, no git metadata: the
+//   store zip is the shippable subset. The staged directory is kept (and tracked) so the
+//   unpacked build and the zip are always the same bytes -- never hand-edit it.
 // - Strips the "key" field from the copied manifest. The Web Store rejects a first
 //   upload whose manifest contains "key"; the store controls identity after that.
 // - With --first-upload, includes key.pem at the zip root. On the INITIAL upload this
@@ -16,7 +18,7 @@
 //   (cdplkgcjpmplghpflbgolpgafngfjlfo), which preserves chrome.storage.sync data for
 //   existing installs. key.pem is looked for next to this script or one directory up.
 //   Never include it in update uploads, and never commit it.
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -25,8 +27,9 @@ const firstUpload = process.argv.includes("--first-upload");
 // 1) Rebuild the worker from source.
 execSync("node build.mjs", { stdio: "inherit" });
 
-// 2) Stage runtime files.
-const stage = "dist/stage";
+// 2) Stage runtime files. This directory IS the unpacked build, so wipe it first:
+//    a stale leftover would otherwise ship inside the zip.
+const stage = "dist/store-upload";
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
@@ -56,10 +59,35 @@ if (firstUpload) {
   fs.copyFileSync(found, path.join(stage, "key.pem"));
 }
 
-// 5) Zip with manifest.json at the ROOT of the archive (store requirement).
+// 5) Collect the staged files, and normalize every mtime to a fixed instant.
+//    Zip records mtimes, so without this an unchanged build still produces different
+//    bytes each run -- and the pre-commit hook would churn the tracked zip forever.
+//    Sorting the entries pins the archive order too (readdir order is not guaranteed).
+const EPOCH = new Date("2020-01-01T00:00:00Z");
+const entries = [];
+(function walk(dir, rel = "") {
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (name.startsWith(".")) continue; // never ship .DS_Store et al
+    const abs = path.join(dir, name);
+    const relPath = rel ? `${rel}/${name}` : name;
+    if (fs.statSync(abs).isDirectory()) walk(abs, relPath);
+    else {
+      fs.utimesSync(abs, EPOCH, EPOCH);
+      entries.push(relPath);
+    }
+  }
+})(stage);
+
+// 6) Zip with manifest.json at the ROOT of the archive (store requirement).
+//    Delete any previous archive first: `zip` UPDATES an existing file rather than
+//    replacing it, so a removed or renamed source file would linger in the upload.
+//    -X drops uid/gid and other platform extras, the last source of nondeterminism.
 const zipName = firstUpload ? "store-upload-first.zip" : "store-upload.zip";
-execSync(`cd ${stage} && zip -qr ../${zipName} .`, { stdio: "inherit" });
-fs.rmSync(stage, { recursive: true, force: true });
+fs.rmSync(path.join("dist", zipName), { force: true });
+execFileSync("zip", ["-qX", `../${zipName}`, ...entries], { cwd: stage, stdio: "inherit" });
+
+// 7) key.pem never belongs in the tracked unpacked build; it only lives in the zip.
+if (firstUpload) fs.rmSync(path.join(stage, "key.pem"), { force: true });
 
 const files = firstUpload ? "manifest, worker, options, popup, icons, key.pem" : "manifest, worker, options, popup, icons";
-console.log(`dist/${zipName} written (${files}; manifest "key" stripped, v${manifest.version})`);
+console.log(`dist/${zipName} + dist/store-upload/ written (${files}; manifest "key" stripped, v${manifest.version})`);

@@ -3,9 +3,11 @@
   "version": "0.10.0",
   "private": true,
   "type": "module",
-  "description": "Tooling-only package.json: lets Node run the test suites and the build script. Chrome ignores this file and reads manifest.json.",
+  "description": "Tooling-only package.json: lets Node run the test suites, the build script, and the pre-commit hook install. Chrome ignores this file and reads manifest.json. Keep \"version\" in sync with manifest.json -- the pre-commit hook enforces it.",
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks",
     "test": "node test/matcher.test.mjs && node test/order.test.mjs && node test/cleanup.test.mjs && node test/drift.test.mjs && node test/reconcile.test.mjs && node test/covered.test.mjs && node test/popup-logic.test.mjs && node test/messages.test.mjs",
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "build:store": "node build-store.mjs"
   }
 }
